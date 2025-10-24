@@ -95,6 +95,25 @@ export function setDoAnImport(
   };
 }
 
+function handleSrcImport(pyodide: Pyodide, e: any): never {
+  // Users may be expecting to import local modules via the `src` directory, which for a default
+  // project structure will fail. This code will add some extra info to the error message to help
+  // them fix it.
+  pyodide.runPython(`
+    try:
+      import sys
+      exc = sys.last_value
+      if isinstance(exc, ModuleNotFoundError) and exc.name == "src":
+        exc.add_note(
+          "If your main module is inside the 'src' directory then your import " +
+          "statement shouldn't include a 'src.' prefix")
+      raise exc
+    finally:
+      del exc
+  `);
+  throw e; // Shouldn't reach here, but to keep TS happy we may as well throw it.
+}
+
 async function pyimportMainModule(pyodide: Pyodide): Promise<PyModule> {
   if (!MAIN_MODULE_NAME.endsWith('.py')) {
     throw new PythonUserError(
@@ -243,6 +262,8 @@ function getMainModule(): Promise<PyModule> {
         return await enterJaegerSpan('pyimport_main_module', () =>
           pyimportMainModule(pyodide)
         );
+      } catch (e: any) {
+        handleSrcImport(pyodide, e);
       } finally {
         Limiter.finishStartup(LOADED_SNAPSHOT_TYPE);
       }
@@ -402,12 +423,17 @@ function makeEntrypointProxyHandler(
         const introspectionMod = await getIntrospectionMod();
 
         const isRelaxed = isFetch || prop === 'test';
-        return await doPyCall(introspectionMod.wrapper_func, [
-          isRelaxed,
-          pyInstance,
-          prop,
-          ...args,
-        ]);
+        try {
+          return await doPyCall(introspectionMod.wrapper_func, [
+            isRelaxed,
+            pyInstance,
+            prop,
+            ...args,
+          ]);
+        } catch (e: any) {
+          const pyodide = await getPyodide();
+          handleSrcImport(pyodide, e);
+        }
       };
     },
   };
